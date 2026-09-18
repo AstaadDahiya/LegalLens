@@ -1,10 +1,20 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import Header from '@/components/Header';
 import Footer from '@/components/Footer';
 
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  themeColor: '#0a0b14',
+  colorScheme: 'dark',
+};
+
 export const metadata: Metadata = {
-  title: 'LegalLens — AI-Powered Legal Document Assistant',
+  title: {
+    default: 'LegalLens — AI-Powered Legal Document Assistant',
+    template: '%s | LegalLens',
+  },
   description:
     'Make legal documents accessible with AI. Simplify contracts, compare agreements, analyze clauses, and get answers to your legal questions — powered by Google Gemini.',
   keywords: [
@@ -14,12 +24,20 @@ export const metadata: Metadata = {
     'clause analysis',
     'legal assistant',
     'legal tech',
+    'AI legal tool',
+    'document analyzer',
   ],
   authors: [{ name: 'LegalLens' }],
+  robots: {
+    index: true,
+    follow: true,
+  },
   openGraph: {
     title: 'LegalLens — AI-Powered Legal Document Assistant',
-    description: 'Make legal documents accessible with AI.',
+    description: 'Make legal documents accessible with AI. Simplify, compare, analyze, and chat with legal documents.',
     type: 'website',
+    siteName: 'LegalLens',
+    locale: 'en_US',
   },
 };
 
