@@ -1,39 +1,41 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import DocumentUploader from '@/components/DocumentUploader';
 import DisclaimerBanner from '@/components/DisclaimerBanner';
+import { renderMarkdown } from '@/lib/render-markdown';
 
 interface ChatMessage {
+  id: string;
   role: 'user' | 'assistant';
   content: string;
 }
 
+let messageIdCounter = 0;
+function nextMessageId(): string {
+  return `msg-${++messageIdCounter}-${Date.now()}`;
+}
+
 /**
- * Lightweight Markdown→HTML for chat bubbles.
+ * Memoized chat bubble that only re-renders when its content changes.
  */
-function renderMarkdown(md: string): string {
-  let html = md
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/&gt; /gm, '> ');
+function ChatBubble({ message }: { message: ChatMessage }) {
+  const html = useMemo(() => renderMarkdown(message.content), [message.content]);
 
-  html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
-  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
-  html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
-  html = html.replace(/\n\n/g, '</p><p>');
-  html = `<p>${html}</p>`;
-  html = html.replace(/<p><(h[1-4]|ul|ol|li|blockquote|hr)/g, '<$1');
-  html = html.replace(/<\/(h[1-4]|ul|ol|li|blockquote)><\/p>/g, '</$1>');
-
-  return html;
+  return (
+    <div className={`chat-message chat-message--${message.role}`}>
+      <div
+        className={`chat-avatar chat-avatar--${message.role}`}
+        aria-hidden="true"
+      >
+        {message.role === 'user' ? '👤' : '⚖️'}
+      </div>
+      <div
+        className="chat-bubble"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    </div>
+  );
 }
 
 export default function ChatPage() {
@@ -44,11 +46,19 @@ export default function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Cleanup abort controller on unmount
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
 
   const handleSendMessage = useCallback(async () => {
     if (!input.trim() || !documentText || isLoading) return;
@@ -57,10 +67,15 @@ export default function ChatPage() {
     setInput('');
     setError(null);
 
-    // Add user message
-    const userMessage: ChatMessage = { role: 'user', content: question };
+    // Add user message with stable ID
+    const userMessage: ChatMessage = { id: nextMessageId(), role: 'user', content: question };
     setMessages((prev) => [...prev, userMessage]);
     setIsLoading(true);
+
+    // Cancel any previous in-flight request
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
       const response = await fetch('/api/chat', {
@@ -69,8 +84,9 @@ export default function ChatPage() {
         body: JSON.stringify({
           documentText,
           question,
-          history: messages,
+          history: messages.map(({ role, content }) => ({ role, content })),
         }),
+        signal: controller.signal,
       });
 
       const data = await response.json();
@@ -80,11 +96,15 @@ export default function ChatPage() {
       }
 
       const assistantMessage: ChatMessage = {
+        id: nextMessageId(),
         role: 'assistant',
         content: data.result,
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return; // Request was cancelled intentionally
+      }
       setError(err instanceof Error ? err.message : 'An unexpected error occurred.');
     } finally {
       setIsLoading(false);
@@ -130,6 +150,7 @@ export default function ChatPage() {
                 setDocumentText(text);
                 setMessages([
                   {
+                    id: nextMessageId(),
                     role: 'assistant',
                     content:
                       "I've loaded your document! I'm ready to answer questions about it. What would you like to know?\n\nHere are some things you can ask:\n- **\"What are my main obligations?\"**\n- **\"Are there any concerning clauses?\"**\n- **\"What happens if I want to terminate?\"**\n- **\"Summarize the payment terms\"**\n- **\"What are the privacy implications?\"**",
@@ -165,6 +186,7 @@ export default function ChatPage() {
               <button
                 className="btn btn-ghost btn-sm"
                 onClick={() => {
+                  abortControllerRef.current?.abort();
                   setDocumentText(null);
                   setMessages([]);
                   setInput('');
@@ -181,24 +203,8 @@ export default function ChatPage() {
               aria-label="Chat messages"
               aria-live="polite"
             >
-              {messages.map((msg, idx) => (
-                <div
-                  key={idx}
-                  className={`chat-message chat-message--${msg.role}`}
-                >
-                  <div
-                    className={`chat-avatar chat-avatar--${msg.role}`}
-                    aria-hidden="true"
-                  >
-                    {msg.role === 'user' ? '👤' : '⚖️'}
-                  </div>
-                  <div
-                    className="chat-bubble"
-                    dangerouslySetInnerHTML={{
-                      __html: renderMarkdown(msg.content),
-                    }}
-                  />
-                </div>
+              {messages.map((msg) => (
+                <ChatBubble key={msg.id} message={msg} />
               ))}
 
               {isLoading && (

@@ -18,6 +18,7 @@ const buckets = new Map<string, TokenBucket>();
 const MAX_TOKENS = 20;       // Maximum requests in the bucket
 const REFILL_RATE = 2;       // Tokens added per second
 const CLEANUP_INTERVAL = 60 * 1000; // Clean up old entries every 60 seconds
+const MAX_BUCKETS = 10_000;  // Cap bucket count to prevent unbounded memory growth
 
 /**
  * Clean up expired buckets to prevent memory leaks.
@@ -31,6 +32,32 @@ function cleanup(): void {
       buckets.delete(key);
     }
   }
+}
+
+/**
+ * Reset the rate limiter state. Used for test isolation.
+ */
+export function resetRateLimiter(): void {
+  buckets.clear();
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+    cleanupTimer = null;
+  }
+}
+
+/**
+ * Get the current number of tracked IP buckets. Used for testing/monitoring.
+ */
+export function getBucketCount(): number {
+  return buckets.size;
+}
+
+/**
+ * Manually trigger cleanup. Exported for testing only.
+ * @internal
+ */
+export function _testOnly_triggerCleanup(): void {
+  cleanup();
 }
 
 // Periodic cleanup
@@ -62,6 +89,10 @@ export function checkRateLimit(identifier: string): {
   let bucket = buckets.get(identifier);
 
   if (!bucket) {
+    // Enforce bucket cap to prevent unbounded memory growth
+    if (buckets.size >= MAX_BUCKETS) {
+      cleanup();
+    }
     // First request from this identifier
     bucket = { tokens: MAX_TOKENS - 1, lastRefill: now };
     buckets.set(identifier, bucket);

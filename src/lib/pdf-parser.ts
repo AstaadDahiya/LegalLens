@@ -103,10 +103,11 @@ export function validateFile(file: File): { valid: boolean; error?: string } {
     return { valid: false, error: 'The uploaded file is empty.' };
   }
 
-  // Check MIME type
-  const isAllowedType = ALLOWED_MIME_TYPES.some(
-    (type) => file.type === type || file.name.endsWith('.pdf') || file.name.endsWith('.txt')
-  );
+  // Check MIME type or file extension
+  const isAllowedType =
+    ALLOWED_MIME_TYPES.includes(file.type) ||
+    file.name.endsWith('.pdf') ||
+    file.name.endsWith('.txt');
   if (!isAllowedType) {
     return {
       valid: false,

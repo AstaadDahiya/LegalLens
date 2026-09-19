@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import DocumentUploader from '@/components/DocumentUploader';
 import ResultPanel from '@/components/ResultPanel';
 import LoadingSpinner from '@/components/LoadingSpinner';
@@ -12,6 +12,14 @@ export default function ComparePage() {
   const [result, setResult] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Cleanup: cancel in-flight request on unmount
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
 
   const handleCompare = useCallback(async () => {
     if (!textA || !textB) return;
@@ -20,11 +28,17 @@ export default function ComparePage() {
     setError(null);
     setResult(null);
 
+    // Cancel any previous in-flight request
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
       const response = await fetch('/api/compare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ textA, textB }),
+        signal: controller.signal,
       });
 
       const data = await response.json();
@@ -35,6 +49,7 @@ export default function ComparePage() {
 
       setResult(data.result);
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       setError(err instanceof Error ? err.message : 'An unexpected error occurred.');
     } finally {
       setIsLoading(false);
