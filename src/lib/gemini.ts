@@ -16,6 +16,86 @@ function getClient(): GoogleGenAI {
 
 const MODEL = 'gemini-2.0-flash';
 
+// ─── LRU Response Cache ─────────────────────────────────────────────────────
+// Prevents redundant API calls for identical document+operation pairs.
+
+interface CacheEntry {
+  result: string;
+  createdAt: number;
+}
+
+const CACHE_MAX_SIZE = 50;
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+const responseCache = new Map<string, CacheEntry>();
+
+/**
+ * Generate a simple hash key for cache lookup.
+ * Uses a fast FNV-1a-inspired hash to avoid storing full text as key.
+ */
+function hashKey(operation: string, text: string): string {
+  let hash = 0x811c9dc5;
+  const input = `${operation}:${text}`;
+  // Only hash first 2000 + last 500 chars for speed on large docs
+  const sample = input.length > 2500
+    ? input.slice(0, 2000) + input.slice(-500)
+    : input;
+  for (let i = 0; i < sample.length; i++) {
+    hash ^= sample.charCodeAt(i);
+    hash = (hash * 0x01000193) >>> 0;
+  }
+  return `${operation}:${hash.toString(36)}:${text.length}`;
+}
+
+function getCached(key: string): string | null {
+  const entry = responseCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.createdAt > CACHE_TTL_MS) {
+    responseCache.delete(key);
+    return null;
+  }
+  // Move to end for LRU behavior
+  responseCache.delete(key);
+  responseCache.set(key, entry);
+  return entry.result;
+}
+
+function setCache(key: string, result: string): void {
+  // Evict oldest if at capacity
+  if (responseCache.size >= CACHE_MAX_SIZE) {
+    const oldest = responseCache.keys().next().value;
+    if (oldest !== undefined) {
+      responseCache.delete(oldest);
+    }
+  }
+  responseCache.set(key, { result, createdAt: Date.now() });
+}
+
+/** Reset cache — exported for testing only. @internal */
+export function _testOnly_clearCache(): void {
+  responseCache.clear();
+}
+
+// ─── Smart Text Truncation ───────────────────────────────────────────────────
+// Prevents sending excessively long documents that waste tokens.
+
+const MAX_INPUT_CHARS = 100_000; // ~25k tokens
+
+/**
+ * Truncate document text to stay within efficient token limits.
+ * Keeps the beginning and end of the document (most important for legal docs).
+ */
+function truncateForEfficiency(text: string): string {
+  if (text.length <= MAX_INPUT_CHARS) return text;
+  const headSize = Math.floor(MAX_INPUT_CHARS * 0.7);
+  const tailSize = Math.floor(MAX_INPUT_CHARS * 0.25);
+  return (
+    text.slice(0, headSize) +
+    '\n\n[... middle section truncated for efficiency ...]\n\n' +
+    text.slice(-tailSize)
+  );
+}
+
 // ─── System Instructions (hoisted as constants to avoid re-creation per call) ───
 
 const SIMPLIFY_INSTRUCTION = `You are LegalLens, an expert legal document simplifier. Your job is to make complex legal language accessible to everyday people.
@@ -134,19 +214,43 @@ At the end, include a **Quick Reference Table** with all terms and their one-lin
 
 Format in clean Markdown.`;
 
+// ─── Adaptive Token Limits ──────────────────────────────────────────────────
+// Different operations need different output sizes.
+
+const TOKEN_LIMITS: Record<string, number> = {
+  simplify: 4096,
+  compare: 6144,
+  analyze: 6144,
+  chat: 2048,
+  checklist: 4096,
+  glossary: 4096,
+};
+
 /**
  * Helper to call Gemini with a system instruction and user prompt.
+ * Includes caching and adaptive token limits for efficiency.
  * Returns the raw text response.
  */
-async function generate(systemInstruction: string, userPrompt: string): Promise<string> {
+async function generate(
+  systemInstruction: string,
+  userPrompt: string,
+  operationKey: string = 'default',
+): Promise<string> {
+  // Check cache first
+  const cacheKey = hashKey(operationKey, userPrompt);
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
   const ai = getClient();
+  const maxOutputTokens = TOKEN_LIMITS[operationKey] ?? 4096;
+
   const response = await ai.models.generateContent({
     model: MODEL,
     contents: userPrompt,
     config: {
       systemInstruction,
       temperature: 0.3,
-      maxOutputTokens: 8192,
+      maxOutputTokens,
     },
   });
 
@@ -154,6 +258,9 @@ async function generate(systemInstruction: string, userPrompt: string): Promise<
   if (!text) {
     throw new Error('Gemini returned an empty response.');
   }
+
+  // Cache the successful response
+  setCache(cacheKey, text);
   return text;
 }
 
@@ -161,21 +268,37 @@ async function generate(systemInstruction: string, userPrompt: string): Promise<
  * Simplify a legal document into plain English.
  */
 export async function simplifyDocument(text: string): Promise<string> {
-  return generate(SIMPLIFY_INSTRUCTION, `Please simplify the following legal document:\n\n---\n${text}\n---`);
+  const truncated = truncateForEfficiency(text);
+  return generate(
+    SIMPLIFY_INSTRUCTION,
+    `Please simplify the following legal document:\n\n---\n${truncated}\n---`,
+    'simplify',
+  );
 }
 
 /**
  * Compare two legal documents and highlight differences.
  */
 export async function compareDocuments(textA: string, textB: string): Promise<string> {
-  return generate(COMPARE_INSTRUCTION, `Please compare these two legal documents:\n\n**DOCUMENT A:**\n---\n${textA}\n---\n\n**DOCUMENT B:**\n---\n${textB}\n---`);
+  const truncA = truncateForEfficiency(textA);
+  const truncB = truncateForEfficiency(textB);
+  return generate(
+    COMPARE_INSTRUCTION,
+    `Please compare these two legal documents:\n\n**DOCUMENT A:**\n---\n${truncA}\n---\n\n**DOCUMENT B:**\n---\n${truncB}\n---`,
+    'compare',
+  );
 }
 
 /**
  * Analyze and categorize clauses in a legal document.
  */
 export async function analyzeClauses(text: string): Promise<string> {
-  return generate(ANALYZE_INSTRUCTION, `Please analyze all clauses in the following legal document:\n\n---\n${text}\n---`);
+  const truncated = truncateForEfficiency(text);
+  return generate(
+    ANALYZE_INSTRUCTION,
+    `Please analyze all clauses in the following legal document:\n\n---\n${truncated}\n---`,
+    'analyze',
+  );
 }
 
 /**
@@ -186,7 +309,8 @@ export async function chatWithDocument(
   question: string,
   history: Array<{ role: 'user' | 'assistant'; content: string }>
 ): Promise<string> {
-  const systemInstruction = `${CHAT_INSTRUCTION_PREFIX}${documentText}\n---`;
+  const truncatedDoc = truncateForEfficiency(documentText);
+  const systemInstruction = `${CHAT_INSTRUCTION_PREFIX}${truncatedDoc}\n---`;
 
   // Build conversation context from history
   let conversationContext = '';
@@ -199,19 +323,29 @@ export async function chatWithDocument(
   }
 
   const userPrompt = `${conversationContext}\nUser's current question: ${question}`;
-  return generate(systemInstruction, userPrompt);
+  return generate(systemInstruction, userPrompt, 'chat');
 }
 
 /**
  * Generate an actionable checklist from a legal document.
  */
 export async function generateChecklist(text: string): Promise<string> {
-  return generate(CHECKLIST_INSTRUCTION, `Please generate comprehensive checklists from the following legal document:\n\n---\n${text}\n---`);
+  const truncated = truncateForEfficiency(text);
+  return generate(
+    CHECKLIST_INSTRUCTION,
+    `Please generate comprehensive checklists from the following legal document:\n\n---\n${truncated}\n---`,
+    'checklist',
+  );
 }
 
 /**
  * Extract and explain legal terminology from a document.
  */
 export async function extractGlossary(text: string): Promise<string> {
-  return generate(GLOSSARY_INSTRUCTION, `Please identify and explain all legal terms and jargon in the following document:\n\n---\n${text}\n---`);
+  const truncated = truncateForEfficiency(text);
+  return generate(
+    GLOSSARY_INSTRUCTION,
+    `Please identify and explain all legal terms and jargon in the following document:\n\n---\n${truncated}\n---`,
+    'glossary',
+  );
 }

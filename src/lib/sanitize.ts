@@ -1,6 +1,9 @@
 /**
  * Input sanitization and validation utilities.
  * Ensures all user-provided text is safe for processing.
+ *
+ * Performance: Regex patterns are compiled once at module scope
+ * instead of being re-created on every function call.
  */
 
 /** Maximum allowed text length (approximately 100 pages of text) */
@@ -11,6 +14,14 @@ export const MIN_TEXT_LENGTH = 50;
 
 /** Maximum question length for chat */
 export const MAX_QUESTION_LENGTH = 2000;
+
+/** Maximum request body size in bytes (10 MB) */
+export const MAX_REQUEST_BODY_SIZE = 10 * 1024 * 1024;
+
+// Pre-compiled regex patterns for sanitization (avoids re-compilation per call)
+const NULL_BYTE_RE = /\0/g;
+const CONTROL_CHAR_RE = /[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+const EXCESSIVE_NEWLINES_RE = /\n{4,}/g;
 
 /**
  * Strip potentially dangerous content from user input text.
@@ -26,11 +37,11 @@ export function sanitizeText(text: string): string {
 
   return text
     // Remove null bytes
-    .replace(/\0/g, '')
+    .replace(NULL_BYTE_RE, '')
     // Remove other control characters except common whitespace (tab, newline, carriage return)
-    .replace(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(CONTROL_CHAR_RE, '')
     // Normalize excessive whitespace (more than 3 consecutive blank lines)
-    .replace(/\n{4,}/g, '\n\n\n')
+    .replace(EXCESSIVE_NEWLINES_RE, '\n\n\n')
     // Trim leading and trailing whitespace
     .trim();
 }
@@ -101,6 +112,29 @@ export function validateQuestion(question: string): {
 }
 
 /**
+ * Validate the request body size to prevent oversized payloads.
+ * Should be called early in API route handlers.
+ *
+ * @param contentLength - The Content-Length header value
+ * @returns Validation result with error message if invalid
+ */
+export function validateRequestSize(contentLength: string | null): {
+  valid: boolean;
+  error?: string;
+} {
+  if (contentLength) {
+    const size = parseInt(contentLength, 10);
+    if (!isNaN(size) && size > MAX_REQUEST_BODY_SIZE) {
+      return {
+        valid: false,
+        error: `Request body too large (${(size / 1024 / 1024).toFixed(1)} MB). Maximum allowed is ${MAX_REQUEST_BODY_SIZE / 1024 / 1024} MB.`,
+      };
+    }
+  }
+  return { valid: true };
+}
+
+/**
  * Create a standardized error response object.
  */
 export function createErrorResponse(message: string, status: number = 400) {
@@ -115,10 +149,18 @@ export function createErrorResponse(message: string, status: number = 400) {
 
 /**
  * Create a standardized success response object.
+ * Includes Cache-Control headers for API response caching.
  */
 export function createSuccessResponse(data: Record<string, unknown>) {
-  return Response.json({
-    ...data,
-    timestamp: new Date().toISOString(),
-  });
+  return Response.json(
+    {
+      ...data,
+      timestamp: new Date().toISOString(),
+    },
+    {
+      headers: {
+        'Cache-Control': 'private, max-age=300', // Cache for 5 minutes client-side
+      },
+    }
+  );
 }

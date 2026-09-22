@@ -2,9 +2,11 @@ import {
   sanitizeText,
   validateDocumentText,
   validateQuestion,
+  validateRequestSize,
   MAX_TEXT_LENGTH,
   MIN_TEXT_LENGTH,
   MAX_QUESTION_LENGTH,
+  MAX_REQUEST_BODY_SIZE,
 } from '../lib/sanitize';
 
 describe('sanitizeText', () => {
@@ -98,5 +100,34 @@ describe('validateQuestion', () => {
     const result = validateQuestion('What are the main obligations in this contract?');
     expect(result.valid).toBe(true);
     expect(result.sanitized).toBeDefined();
+  });
+});
+
+describe('validateRequestSize', () => {
+  it('should accept requests with no content-length header', () => {
+    const result = validateRequestSize(null);
+    expect(result.valid).toBe(true);
+  });
+
+  it('should accept requests within the size limit', () => {
+    const result = validateRequestSize('1024');
+    expect(result.valid).toBe(true);
+  });
+
+  it('should reject requests exceeding the size limit', () => {
+    const oversized = (MAX_REQUEST_BODY_SIZE + 1).toString();
+    const result = validateRequestSize(oversized);
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain('too large');
+  });
+
+  it('should handle non-numeric content-length gracefully', () => {
+    const result = validateRequestSize('not-a-number');
+    expect(result.valid).toBe(true);
+  });
+
+  it('should accept exactly the maximum size', () => {
+    const result = validateRequestSize(MAX_REQUEST_BODY_SIZE.toString());
+    expect(result.valid).toBe(true);
   });
 });

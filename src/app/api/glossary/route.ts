@@ -3,11 +3,18 @@ import { extractGlossary } from '@/lib/gemini';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
 import {
   validateDocumentText,
+  validateRequestSize,
   createErrorResponse,
   createSuccessResponse,
 } from '@/lib/sanitize';
 
 export async function POST(request: NextRequest) {
+  // Validate request size early to avoid processing oversized payloads
+  const sizeCheck = validateRequestSize(request.headers.get('content-length'));
+  if (!sizeCheck.valid) {
+    return createErrorResponse(sizeCheck.error!, 413);
+  }
+
   const ip = getClientIp(request);
   const rateLimit = checkRateLimit(ip);
   if (!rateLimit.allowed) {

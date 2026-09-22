@@ -21,10 +21,12 @@ import {
   chatWithDocument,
   generateChecklist,
   extractGlossary,
+  _testOnly_clearCache,
 } from '../lib/gemini';
 
 beforeEach(() => {
   mockGenerateContent.mockReset();
+  _testOnly_clearCache();
   process.env.GEMINI_API_KEY = 'test-key-123';
 });
 
@@ -88,6 +90,13 @@ describe('simplifyDocument', () => {
     const result = await simplifyDocument('test doc');
     expect(typeof result).toBe('string');
   });
+
+  it('should use adaptive token limits for simplify operation', async () => {
+    mockGenerateContent.mockResolvedValueOnce({ text: 'result' });
+    await simplifyDocument('test doc');
+    const call = mockGenerateContent.mock.calls[0][0];
+    expect(call.config.maxOutputTokens).toBe(4096);
+  });
 });
 
 describe('compareDocuments', () => {
@@ -101,6 +110,13 @@ describe('compareDocuments', () => {
     expect(call.contents).toContain('Document A content');
     expect(call.contents).toContain('Document B content');
     expect(call.config.systemInstruction).toContain('comparator');
+  });
+
+  it('should use adaptive token limits for compare operation', async () => {
+    mockGenerateContent.mockResolvedValueOnce({ text: 'result' });
+    await compareDocuments('doc A', 'doc B');
+    const call = mockGenerateContent.mock.calls[0][0];
+    expect(call.config.maxOutputTokens).toBe(6144);
   });
 });
 
@@ -174,6 +190,13 @@ describe('chatWithDocument', () => {
     const call = mockGenerateContent.mock.calls[0][0];
     expect(call.contents).toContain('Question?');
   });
+
+  it('should use lower token limit for chat responses', async () => {
+    mockGenerateContent.mockResolvedValueOnce({ text: 'answer' });
+    await chatWithDocument('Doc', 'Question?', []);
+    const call = mockGenerateContent.mock.calls[0][0];
+    expect(call.config.maxOutputTokens).toBe(2048);
+  });
 });
 
 describe('generateChecklist', () => {
@@ -197,6 +220,72 @@ describe('extractGlossary', () => {
     expect(result).toBe('**Term**: Definition');
     const call = mockGenerateContent.mock.calls[0][0];
     expect(call.config.systemInstruction).toContain('terminology');
+  });
+});
+
+describe('Response Caching', () => {
+  it('should return cached result for identical requests', async () => {
+    mockGenerateContent.mockResolvedValueOnce({ text: 'cached result' });
+
+    const result1 = await simplifyDocument('test document content');
+    const result2 = await simplifyDocument('test document content');
+
+    expect(result1).toBe('cached result');
+    expect(result2).toBe('cached result');
+    // Should only have called the API once
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not cache different inputs', async () => {
+    mockGenerateContent
+      .mockResolvedValueOnce({ text: 'result A' })
+      .mockResolvedValueOnce({ text: 'result B' });
+
+    const result1 = await simplifyDocument('document A');
+    const result2 = await simplifyDocument('document B');
+
+    expect(result1).toBe('result A');
+    expect(result2).toBe('result B');
+    expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+  });
+
+  it('should clear cache when _testOnly_clearCache is called', async () => {
+    mockGenerateContent
+      .mockResolvedValueOnce({ text: 'first' })
+      .mockResolvedValueOnce({ text: 'second' });
+
+    await simplifyDocument('test doc');
+    _testOnly_clearCache();
+    const result = await simplifyDocument('test doc');
+
+    expect(result).toBe('second');
+    expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('Text Truncation', () => {
+  it('should handle very large documents by truncating', async () => {
+    mockGenerateContent.mockResolvedValueOnce({ text: 'result' });
+
+    // Create a document larger than 100k chars
+    const largeDoc = 'x'.repeat(150_000);
+    await simplifyDocument(largeDoc);
+
+    const call = mockGenerateContent.mock.calls[0][0];
+    // The contents should be shorter than the original due to truncation
+    expect(call.contents.length).toBeLessThan(largeDoc.length);
+    expect(call.contents).toContain('truncated for efficiency');
+  });
+
+  it('should not truncate documents under the limit', async () => {
+    mockGenerateContent.mockResolvedValueOnce({ text: 'result' });
+
+    const normalDoc = 'This is a normal sized document.';
+    await simplifyDocument(normalDoc);
+
+    const call = mockGenerateContent.mock.calls[0][0];
+    expect(call.contents).toContain(normalDoc);
+    expect(call.contents).not.toContain('truncated');
   });
 });
 
